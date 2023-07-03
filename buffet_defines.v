@@ -26,9 +26,9 @@
 `define SIZE            2 ** `IDX_WIDTH - 1
 `define SEPARATE_WRITE_PORTS    1
 `define SUPPORTS_UPDATE         1
-`define READREQ_FIFO_DEPTH      8
-`define UPDATE_FIFO_DEPTH       8
-`define READRESP_FIFO_DEPTH     8
-`define PUSH_FIFO_DEPTH         8
+`define READREQ_FIFO_DEPTH      2
+`define UPDATE_FIFO_DEPTH       2
+`define READRESP_FIFO_DEPTH     2
+`define PUSH_FIFO_DEPTH         2
 
 `define SCOREBOARD_SIZE         8

@@ -19,7 +19,7 @@
 
 
 
-`include "buffet_defines.v"
+`include "../buffet_defines.v"
 
 module buffet(
 			clk,
@@ -54,6 +54,7 @@ module buffet(
  
 	parameter IDX_WIDTH     = `IDX_WIDTH; // Index width
 	parameter DATA_WIDTH    = `DATA_WIDTH; // Data width
+    parameter SIZE          = `SIZE;
  
 	// If this is 0, the in-place update path will be
 	// statically removed (only Fill writes the RAM)
@@ -211,7 +212,7 @@ buffet_control
             #(
             .DATA_WIDTH(DATA_WIDTH),
             .ADDR_WIDTH(IDX_WIDTH),
-            .SIZE(`SIZE)
+            .SIZE(SIZE)
             )
             u_control
             (
@@ -250,7 +251,7 @@ buffet_control
             );
 
 // RAM
-dpram 	
+dpram_r2 	
 			#(
             .ADDR_WIDTH(IDX_WIDTH),
             .DATA_WIDTH(DATA_WIDTH),
@@ -269,7 +270,8 @@ dpram
 			.WDATA0(wdata0_buffet),
 			.WDATA1(wdata1_buffet),
 			.RDATA(read_data_buffet),
-			.RVALID(read_data_buffet_valid)
+			.RVALID(read_data_buffet_valid),
+            .RREADY(read_data_fifo_ready)
 			);
 
 
@@ -289,6 +291,6 @@ end
 //------------------------------------------------------------------
 //	                   ASSIGN OUTPUTS
 //------------------------------------------------------------------
-assign update_receive_ack = update_receive_ack_r;
+assign update_receive_ack = update_idx_valid & update_data_valid;
 
 endmodule

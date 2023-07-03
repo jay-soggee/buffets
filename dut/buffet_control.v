@@ -19,7 +19,7 @@
 
 
 
-`include "buffet_defines.v"
+`include "../buffet_defines.v"
 
 module buffet_control
         (
@@ -138,7 +138,7 @@ wire    [ADDR_WIDTH-1:0]     tail_head_distance = tail - head;
 
 // In case 1, tail_head_distance directly gives occupancy, in case (2) offset needs to be added to tail.
 wire    [ADDR_WIDTH-1:0]     occupancy = (tail_greater_than_head)? tail_head_distance :
-                                        (tail + head_offset);
+                                        (tail + head_offset +1);
 
 // Available space in the bbuffer
 wire    [ADDR_WIDTH-1:0]     space_avail = SIZE - occupancy;
@@ -147,8 +147,8 @@ wire    [ADDR_WIDTH-1:0]     space_avail = SIZE - occupancy;
 wire                        empty = (occupancy == 1'b0)? 1'b1:1'b0;
 
 // All the possible events
-wire                        read_event = ~empty & read_idx_valid_i & ~read_is_shrink;
-wire                        shrink_event = ~empty & read_idx_valid_i & read_is_shrink;
+wire                        read_event = read_idx_valid_i & ~read_is_shrink;
+wire                        shrink_event = read_idx_valid_i & read_is_shrink;
 wire                        write_event = push_data_valid_i;
 wire                        update_event = update_valid_i;
 wire [1:0]                  event_cur = {read_event, shrink_event, write_event, update_event};
@@ -161,7 +161,7 @@ wire                        read_valid_hgtt_n = ~read_valid_hgtt;
 wire                        read_valid = (tail_greater_than_head)? read_valid_hgtt : read_valid_hgtt_n;
 // WAR hazard is when you are trying to read something that is not present in the buffet yet - wait till you receive it.
 // Caution: this might lead to a lock -- TODO a way to retire waiting reads.
-wire                        war_hazard = ~read_valid;
+wire                        war_hazard = ~read_valid & ~read_is_shrink;
 
 // RAW hazard detection is simply checking the outstanding updates
 
@@ -203,13 +203,29 @@ leadingZero8 u_LZE8(.sequence(match_reversed), .index(match_addr));
         // *** Credit logic *** //
        //**********************//
        
-// Reflects credit ready
-always @(posedge clk or negedge nreset_i) begin
+// the init signal. 
+// if 0, send initial credit to Agen. 
+// if 1, send credit only when shrink happens.
+reg         init;
+reg         credit_valid_rr;
+always @(posedge clk) begin
     if(~nreset_i) begin
         credit_valid_r <= 1'b0;
+        credit_valid_rr <= 0;
+        init <= 0;
     end
     else begin
-        credit_valid_r <= credit_ready;
+        if (!init) begin
+            credit_valid_rr <= credit_ready;
+            init <= 1;
+        end else begin
+            if (shrink_event) begin
+                credit_valid_rr <= 1'b1;
+            end else if (credit_valid_rr & credit_ready) begin
+                credit_valid_rr <= 1'b0;
+            end
+        end
+        credit_valid_r <= credit_valid_rr;
     end
 end
 
@@ -245,8 +261,14 @@ always @(posedge clk or negedge nreset_i) begin
         tail <= {ADDR_WIDTH{1'b0}};
     end
     else begin
-        if(push_data_valid_i)
-            tail <= tail + 1'b1;
+        if(push_data_valid_i) begin
+            if (tail == SIZE) begin
+                tail <= 0;
+            end else begin
+                tail <= tail + 1'b1;
+            end
+        end
+
     end
 end
 
@@ -269,6 +291,8 @@ end
 // However, if writes and updates share a write path, then we need to wait for the 
 // acknowledgement of update. TODO: Arbitration
 // NOTE: This problem does not exist if the update gets static priority over the writes.
+wire  [ADDR_WIDTH-1:0]    update_addr_tmp = update_idx_i + head;
+wire  [ADDR_WIDTH-1:0]    update_addr     = (update_addr_tmp >= (SIZE+1)) ? update_addr_tmp - (SIZE+1) : update_addr_tmp;
 
 // We will first register the update request.
 always @(posedge clk or negedge nreset_i) begin
@@ -278,7 +302,7 @@ always @(posedge clk or negedge nreset_i) begin
     end
     else begin
         if(update_valid_i) begin
-            update_idx_i_r <= update_idx_i;
+            update_idx_i_r <= update_addr;
         end
         update_valid_i_r <= update_valid_i;
     end
@@ -313,6 +337,8 @@ end
 
 // Read gets stalled if (1) tries to get something that is slated for an update (2) beyond the window.
 // Otherwise, simply return the data.
+wire  [ADDR_WIDTH-1:0]    read_addr_tmp = read_idx_i + head;
+wire  [ADDR_WIDTH-1:0]    read_addr     = (read_addr_tmp >= (SIZE+1)) ? read_addr_tmp - (SIZE+1) : read_addr_tmp;
 
 // State Machine
 always @(posedge clk or negedge nreset_i) begin
@@ -349,12 +375,13 @@ always @(posedge clk or negedge nreset_i) begin
         if(read_event & (read_state != WAIT)) begin
             read_idx_valid_i_r  <= read_idx_valid_i;
             read_will_update_r  <= read_will_update;
-            read_idx_i_r        <= read_idx_i + head;
+            read_idx_i_r        <= read_addr;
         end
         else if((read_idx_valid_stage_r) & (read_state == DISPATCH)) begin
             read_idx_valid_i_r  <= 1'b1;
             read_will_update_r  <= read_will_update_stage_r;
             read_idx_i_r        <= read_idx_stage_r;
+            read_idx_valid_stage_r <= 0;
         end
         else begin
             read_idx_valid_i_r  <= 1'b0;
@@ -375,7 +402,7 @@ always @(posedge clk or negedge nreset_i) begin
         if(read_event & (read_state == WAIT)) begin
             read_idx_valid_stage_r  <= read_idx_valid_i;
             read_will_update_stage_r<= read_will_update;
-            read_idx_stage_r        <= read_idx_i + head;
+            read_idx_stage_r        <= read_addr;
         end
     end
 end
@@ -414,14 +441,20 @@ end
         // ***  Shrink Logic ***//
        //**********************//
 
+wire     [ADDR_WIDTH-1:0]    head_next = head + read_idx_i;
 // If a valid shrink comes in, we update the head. (This is the only driver for head reg)
 always @(posedge clk or negedge nreset_i) begin
     if(~nreset_i) begin
         head <= {ADDR_WIDTH{1'b0}};
     end
     else begin
-        if(shrink_event)
-            head <= head + read_idx_i;
+        if(shrink_event) begin
+            if (head_next >= (SIZE+1)) begin
+                head <= head_next - (SIZE+1);
+            end else begin
+                head <= head_next;
+            end
+        end
     end
 end
 
